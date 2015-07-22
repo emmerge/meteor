@@ -49,7 +49,7 @@ var getTokens = function (query) {
         code: query.code,
         client_id: config.clientId,
         client_secret: OAuth.openSecret(config.secret),
-        redirect_uri: OAuth._redirectUri('google', config),
+        redirect_uri: query.installedClient ? '' : OAuth._redirectUri('google', config),
         grant_type: 'authorization_code'
       }});
   } catch (err) {
