@@ -4,14 +4,14 @@
 /// to ensure we get consistent versions of npm sub-dependencies.
 var Future = require('fibers/future');
 
-var cleanup = require('../cleanup.js');
-var files = require('../files.js');
+var cleanup = require('../tool-env/cleanup.js');
+var files = require('../fs/files.js');
 var os = require('os');
 var _ = require('underscore');
-var httpHelpers = require('../http-helpers.js');
-var buildmessage = require('../buildmessage.js');
-var utils = require('../utils.js');
-var runLog = require('../run-log.js');
+var httpHelpers = require('../utils/http-helpers.js');
+var buildmessage = require('../utils/buildmessage.js');
+var utils = require('../utils/utils.js');
+var runLog = require('../runners/run-log.js');
 
 var meteorNpm = exports;
 
@@ -342,7 +342,8 @@ var runNpmCommand = function (args, cwd) {
   var npmPath;
 
   if (os.platform() === "win32") {
-    npmPath = files.pathJoin(nodeBinDir, "npm.cmd");
+    npmPath = files.convertToOSPath(
+      files.pathJoin(nodeBinDir, "npm.cmd"));
   } else {
     npmPath = files.pathJoin(nodeBinDir, "npm");
   }
@@ -375,6 +376,7 @@ var runNpmCommand = function (args, cwd) {
 
     future.return({
       success: ! err,
+      error: (err ? `${err.message}${stderr}` : stderr),
       stdout: stdout,
       stderr: stderr
     });
@@ -420,9 +422,7 @@ var getInstalledDependenciesTree = function (dir) {
   if (result.success)
     return JSON.parse(result.stdout);
 
-  // XXX include this in the buildmessage.error instead
-  runLog.log(result.stderr);
-  buildmessage.error("couldn't read npm version lock information");
+  buildmessage.error(`couldn't read npm version lock information: ${result.error}`);
   // Recover by returning false from updateDependencies
   throw new NpmFailure;
 };
@@ -497,9 +497,7 @@ var installNpmModule = function (name, version, dir) {
       buildmessage.error(name + " version " + version + " " +
                          "is not available in the npm registry");
     } else {
-      // XXX include this in the buildmessage.error instead
-      runLog.log(result.stderr);
-      buildmessage.error("couldn't install npm package");
+      buildmessage.error(`couldn't install npm package ${name}@${version}: ${result.error}`);
     }
 
     // Recover by returning false from updateDependencies
@@ -541,9 +539,7 @@ var installFromShrinkwrap = function (dir) {
   var result = runNpmCommand(["install"], dir);
 
   if (! result.success) {
-    // XXX include this in the buildmessage.error instead
-    runLog.log(result.stderr);
-    buildmessage.error("couldn't install npm packages from npm-shrinkwrap");
+    buildmessage.error(`couldn't install npm packages from npm-shrinkwrap: ${result.error}`);
     // Recover by returning false from updateDependencies
     throw new NpmFailure;
   }
@@ -572,9 +568,7 @@ var shrinkwrap = function (dir) {
   var result = runNpmCommand(["shrinkwrap"], dir);
 
   if (! result.success) {
-    // XXX include this in the buildmessage.error instead
-    runLog.log(result.stderr);
-    buildmessage.error("couldn't run `npm shrinkwrap`");
+    buildmessage.error(`couldn't run \`npm shrinkwrap\`: ${result.error}`);
     // Recover by returning false from updateDependencies
     throw new NpmFailure;
   }

@@ -1,18 +1,18 @@
 var compiler = require('./compiler.js');
-var archinfo = require('../archinfo.js');
+var archinfo = require('../utils/archinfo.js');
 var _ = require('underscore');
 var linker = require('./linker.js');
-var buildmessage = require('../buildmessage.js');
+var buildmessage = require('../utils/buildmessage.js');
 var Builder = require('./builder.js');
 var bundler = require('./bundler.js');
-var watch = require('../watch.js');
-var files = require('../files.js');
-var isopackets = require("../isopackets.js");
-var colonConverter = require('../colon-converter.js');
-var linterPluginModule = require('./linter-plugin.js');
+var watch = require('../fs/watch.js');
+var files = require('../fs/files.js');
+var isopackets = require('../tool-env/isopackets.js');
+var colonConverter = require('../utils/colon-converter.js');
+var utils = require('../utils/utils.js');
 var buildPluginModule = require('./build-plugin.js');
-var Console = require('../console.js').Console;
-var Profile = require('../profile.js').Profile;
+var Console = require('../console/console.js').Console;
+var Profile = require('../tool-env/profile.js').Profile;
 
 var rejectBadPath = function (p) {
   if (p.match(/\.\./))
@@ -124,6 +124,7 @@ var Isopack = function () {
   self.version = null;
   self.isTest = false;
   self.debugOnly = false;
+  self.prodOnly = false;
 
   // Unibuilds, an array of class Unibuild.
   self.unibuilds = [];
@@ -331,6 +332,7 @@ _.extend(Isopack.prototype, {
     self.npmDiscards = options.npmDiscards;
     self.includeTool = options.includeTool;
     self.debugOnly = options.debugOnly;
+    self.prodOnly = options.prodOnly;
     self.pluginCacheDir = options.pluginCacheDir || null;
     self.isobuildFeatures = options.isobuildFeatures;
   },
@@ -678,10 +680,10 @@ _.extend(Isopack.prototype, {
        * add a compiler that will handle files with certain extensions or
        * filenames.
        * @param {Object} options
-       * @param {[String]} options.extensions The file extensions that this
+       * @param {String[]} options.extensions The file extensions that this
        * plugin should handle, without the first dot.
        * Examples: `["coffee", "coffee.md"]`.
-       * @param {[String]} options.filenames The list of filenames
+       * @param {String[]} options.filenames The list of filenames
        * that this plugin should handle. Examples: `["config.json"]`.
        * @param {Function} factory A function that returns an instance
        * of a compiler class.
@@ -721,14 +723,14 @@ _.extend(Isopack.prototype, {
       // Unlike compilers and minifiers, linters run on one package
       // at a time.  Linters are run by `meteor run`, `meteor publish`,
       // and `meteor lint`.
-      
+
       /**
        * @summary Inside a build plugin source file specified in
        * [Package.registerBuildPlugin](#Package-registerBuildPlugin),
        * add a linter that will handle files with certain extensions or
        * filenames.
        * @param {Object} options
-       * @param {[String]} options.extensions The file extensions that this
+       * @param {String[]} options.extensions The file extensions that this
        * plugin should handle, without the first dot.
        * Examples: `["js", "es6", "jsx"]`.
        * @param {Function} factory A function that returns an instance
@@ -778,10 +780,10 @@ _.extend(Isopack.prototype, {
        * add a linter that will handle files with certain extensions or
        * filenames.
        * @param {Object} options
-       * @param {[String]} options.extensions The file extensions that this
+       * @param {String[]} options.extensions The file extensions that this
        * plugin should handle, without the first dot. Can only be "js" or "css".
        * Examples: `["js", "css"]`.
-       * @param {[String]} options.filenames The list of filenames
+       * @param {String[]} options.filenames The list of filenames
        * that this plugin should handle. Examples: `["config.json"]`.
        * @param {Function} factory A function that returns an instance
        * of a minifier class.
@@ -814,7 +816,21 @@ _.extend(Isopack.prototype, {
 
       nudge: function () {
         Console.nudge(true);
-      }
+      },
+
+      convertToOSPath: files.convertToOSPath,
+      convertToStandardPath: files.convertToStandardPath,
+      path: {
+        join: files.pathJoin,
+        normalize: files.pathNormalize,
+        relative: files.pathRelative,
+        resolve: files.pathResolve,
+        dirname: files.pathDirname,
+        basename: files.pathBasename,
+        extname: files.pathExtname,
+        sep: files.pathSep
+      },
+      fs: files.fsFixPath
     };
     return Plugin;
   },
@@ -896,6 +912,7 @@ _.extend(Isopack.prototype, {
       self.version = mainJson.version;
       self.isTest = mainJson.isTest;
       self.debugOnly = !!mainJson.debugOnly;
+      self.prodOnly = !!mainJson.prodOnly;
     }
     _.each(mainJson.plugins, function (pluginMeta) {
       rejectBadPath(pluginMeta.path);
@@ -977,6 +994,10 @@ _.extend(Isopack.prototype, {
             // It's a shame to have to calculate the hash here instead of having
             // it on disk, but this only runs for legacy packages anyway.
             hash: watch.sha1(data),
+            // Legacy prelink files definitely don't have a source processor!
+            // They were created by an Isobuild that didn't even know about
+            // source processors!
+            usesDefaultSourceProcessor: true,
             legacyPrelink: {
               packageVariables: unibuildJson.packageVariables || []
             }
@@ -1067,30 +1088,34 @@ _.extend(Isopack.prototype, {
     });
   },
 
-  _canWriteLegacyBuilds(options) {
-    if (! options.includePreCompilerPluginIsopackVersions) {
-      return false;
-    }
-
-    function isResourceUnsafeForLegacyBuilds(resource) {
-      if (resource.type === "source") {
-        // This package cannot be represented as an isopack-1 Isopack if
-        // it uses a file implemented by registerCompiler other than the
-        // very basic JS and CSS types.
-        if (resource.extension === "js") {
-          // If this JS resource uses hard-coded support for plain old
-          // ES5, then it is safe to write as part of a legacy Isopack.
-          return ! resource.usesDefaultSourceProcessor;
-        }
-
-        return resource.extension !== "css";
+  canWriteLegacyBuilds() {
+    function isResourceSafeForLegacyBuilds(resource) {
+      // The only new kind of resource is "source"; other resources are
+      // unchanged from legacy builds.
+      if (resource.type !== "source") {
+        return true;
       }
 
+      // CSS is safe for legacy builds. (We assume everyone is using the
+      // SourceProcessor from the 'meteor' package.)
+      if (resource.extension === "css") {
+        return true;
+      }
+
+      // If this JS resource uses hard-coded support for plain old ES5, then it
+      // is safe to write as part of a legacy Isopack.
+      if (resource.extension === "js" && resource.usesDefaultSourceProcessor) {
+        return true;
+      }
+
+      // Nope, this package cannot be represented as an isopack-1 Isopack
+      // because it uses a file implemented by registerCompiler other than the
+      // very basic JS and CSS types.
       return false;
     }
 
-    return ! this.unibuilds.some(
-      unibuild => unibuild.resources.some(isResourceUnsafeForLegacyBuilds)
+    return this.unibuilds.every(
+      unibuild => unibuild.resources.every(isResourceSafeForLegacyBuilds)
     );
   },
 
@@ -1130,11 +1155,16 @@ _.extend(Isopack.prototype, {
       if (self.debugOnly) {
         mainJson.debugOnly = true;
       }
+      if (self.prodOnly) {
+        mainJson.prodOnly = true;
+      }
       if (! _.isEmpty(self.cordovaDependencies)) {
         mainJson.cordovaDependencies = self.cordovaDependencies;
       }
 
-      const writeLegacyBuilds = self._canWriteLegacyBuilds(options);
+      const writeLegacyBuilds = (
+        options.includePreCompilerPluginIsopackVersions
+          && self.canWriteLegacyBuilds());
 
       var isopackBuildInfoJson = null;
       if (options.includeIsopackBuildInfo) {
@@ -1543,9 +1573,9 @@ _.extend(Isopack.prototype, {
   _writeTool: Profile("Isopack#_writeTool", function (builder) {
     var self = this;
 
-    var pathsToCopy = files.runGitInCheckout(
+    var pathsToCopy = utils.runGitInCheckout(
       'ls-tree',
-      '-r',  // recursive
+      '-r',
       '--name-only',
       '--full-tree',
       'HEAD',
@@ -1565,6 +1595,16 @@ _.extend(Isopack.prototype, {
     var transpileRegexes = [
       /^tools\/[^\/]+\.js$/, // General tools files
       /^tools\/isobuild\/[^\/]+\.js$/, // Isobuild files
+      /^tools\/cli\/[^\/]+\.js$/, // CLI files
+      /^tools\/tool-env\/[^\/]+\.js$/, // Tool initiation and clean up
+      /^tools\/runners\/[^\/]+\.js$/, // Parts of tool process
+      /^tools\/packaging\/[^\/]+\.js$/,
+      /^tools\/packaging\/catalog\/[^\/]+\.js$/,
+      /^tools\/utils\/[^\/]+\.js$/,
+      /^tools\/fs\/[^\/]+\.js$/,
+      /^tools\/meteor-services\/[^\/]+\.js$/,
+      /^tools\/tool-testing\/[^\/]+\.js$/,
+      /^tools\/console\/[^\/]+\.js$/,
       // We don't support running self-test from an install anymore
     ];
 
@@ -1599,13 +1639,13 @@ _.extend(Isopack.prototype, {
       // We don't actually want to load the babel auto-transpiler when we are
       // in a Meteor installation where everything is already transpiled for us.
       // Therefore, strip out that line in main.js
-      if (path === "tools/install-babel.js" ||
-          path === "tools/source-map-retriever-stack.js") {
+      if (path === "tools/tool-env/install-babel.js" ||
+          path === "tools/tool-env/source-map-retriever-stack.js") {
         inputFileContents = inputFileContents.replace(/^.*#RemoveInProd.*$/mg, "");
       }
 
       var babelOptions = babel.getDefaultOptions(
-        require("../babel-features.js")
+        require('../tool-env/babel-features.js')
       );
 
       _.extend(babelOptions, {
@@ -1628,7 +1668,7 @@ _.extend(Isopack.prototype, {
       });
     });
 
-    var gitSha = files.runGitInCheckout('rev-parse', 'HEAD');
+    var gitSha = utils.runGitInCheckout('rev-parse', 'HEAD');
     builder.reserve('isopackets', {directory: true});
     builder.write('.git_version.txt', {data: new Buffer(gitSha, 'utf8')});
 

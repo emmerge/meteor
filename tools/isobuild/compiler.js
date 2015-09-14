@@ -1,19 +1,17 @@
 var _ = require('underscore');
 
-var archinfo = require('../archinfo.js');
-var buildmessage = require('../buildmessage.js');
+var archinfo = require('../utils/archinfo.js');
+var buildmessage = require('../utils/buildmessage.js');
 var bundler = require('./bundler.js');
 var isopack = require('./isopack.js');
-var isopackets = require('../isopackets.js');
-var linker = require('./linker.js');
 var meteorNpm = require('./meteor-npm.js');
-var watch = require('../watch.js');
-var Console = require('../console.js').Console;
-var files = require('../files.js');
-var colonConverter = require('../colon-converter.js');
+var watch = require('../fs/watch.js');
+var Console = require('../console/console.js').Console;
+var files = require('../fs/files.js');
+var colonConverter = require('../utils/colon-converter.js');
 var linterPluginModule = require('./linter-plugin.js');
 var compileStepModule = require('./compiler-deprecated-compile-step.js');
-var Profile = require('../profile.js').Profile;
+var Profile = require('../tool-env/profile.js').Profile;
 import { SourceProcessorSet } from './build-plugin.js';
 
 var compiler = exports;
@@ -122,8 +120,10 @@ compiler.compile = Profile(function (packageSource, options) {
                                      packageSource.npmDependencies)) {
       nodeModulesPath = files.pathJoin(packageSource.npmCacheDirectory,
                                   'node_modules');
-      if (! meteorNpm.dependenciesArePortable(packageSource.npmCacheDirectory))
+      if (! process.env.METEOR_FORCE_PORTABLE &&
+          ! meteorNpm.dependenciesArePortable(packageSource.npmCacheDirectory)) {
         isPortable = false;
+      }
     }
   }
 
@@ -163,6 +163,7 @@ compiler.compile = Profile(function (packageSource, options) {
     npmDiscards: packageSource.npmDiscards,
     includeTool: packageSource.includeTool,
     debugOnly: packageSource.debugOnly,
+    prodOnly: packageSource.prodOnly,
     pluginCacheDir: options.pluginCacheDir,
     isobuildFeatures
   });
@@ -646,7 +647,11 @@ function runLinters({inputSourceArch, isopackCache, sourceItems,
     arch: whichArch,
     isopackCache: isopackCache,
     skipUnordered: true,
-    skipDebugOnly: true
+    // don't import symbols from debugOnly and prodOnly packages, because
+    // if the package is not linked it will cause a runtime error.
+    // the code must access them with `Package["my-package"].MySymbol`.
+    skipDebugOnly: true,
+    skipProdOnly: true,
   }, (unibuild) => {
     if (unibuild.pkg.name === inputSourceArch.pkg.name)
       return;
@@ -827,6 +832,9 @@ compiler.eachUsedUnibuild = function (
     // debug-only.
     if (usedPackage.debugOnly && options.skipDebugOnly)
       continue;
+    // Ditto prodOnly.
+    if (usedPackage.prodOnly && options.skipProdOnly)
+      continue;
 
     var unibuild = usedPackage.getUnibuildAtArch(arch);
     if (!unibuild) {
@@ -856,7 +864,42 @@ export function isIsobuildFeaturePackage(packageName) {
 }
 
 export const KNOWN_ISOBUILD_FEATURE_PACKAGES = {
+  // This package directly calls Plugin.registerCompiler. Package authors
+  // must explicitly depend on this feature package to use the API.
   'isobuild:compiler-plugin': ['1.0.0'],
+
+  // This package directly calls Plugin.registerMinifier. Package authors
+  // must explicitly depend on this feature package to use the API.
   'isobuild:minifier-plugin': ['1.0.0'],
-  'isobuild:linter-plugin': ['1.0.0']
+
+  // This package directly calls Plugin.registerLinter. Package authors
+  // must explicitly depend on this feature package to use the API.
+  'isobuild:linter-plugin': ['1.0.0'],
+
+  // This package is only published in the isopack-2 format, not isopack-1 or
+  // older. ie, it contains "source" files for compiler plugins, not just
+  // JS/CSS/static assets/head/body.
+  // This is implicitly added at publish time to any such package; package
+  // authors don't have to add it explicitly. It isn't relevant for local
+  // packages, which can be rebuilt if possible by the older tool.
+  //
+  // Specifically, this is to avoid the case where a package is published with a
+  // dependency like `api.use('less@1.0.0 || 2.0.0')` and the publication
+  // selects the newer compiler plugin version to generate the isopack. The
+  // published package (if this feature package wasn't implicitly included)
+  // could still be selected by the Version Solver to be used with an old
+  // Isobuild... just because less@2.0.0 depends on isobuild:compiler-plugin
+  // doesn't mean it couldn't choose less@1.0.0, which is not actually
+  // compatible with this published package.  (Constraints of the form described
+  // above are not very helpful, but at least we can prevent old Isobuilds from
+  // choking on confusing packages.)
+  //
+  // (Why not isobuild:isopack@2.0.0? Well, that would imply that Version Solver
+  // would have to choose only one isobuild:isopack feature version, which
+  // doesn't make sense here.)
+  'isobuild:isopack-2': ['1.0.0'],
+
+  // This package uses the `prodOnly` metadata flag, which causes it to
+  // automatically depend on the `isobuild:prod-only` feature package.
+  'isobuild:prod-only': ['1.0.0'],
 };

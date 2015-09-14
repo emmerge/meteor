@@ -1,18 +1,19 @@
 Package.describe({
   summary: "Meteor's client-side datastore: a port of MongoDB to Javascript",
-  version: '1.0.8'
+  version: '1.0.9-plugins.0'
 });
 
 Package.onUse(function (api) {
   api.export('LocalCollection');
   api.export('Minimongo');
   api.export('MinimongoTest', { testOnly: true });
-  api.use(['underscore', 'json', 'ejson', 'id-map', 'ordered-dict', 'tracker',
+  api.use(['underscore', 'ejson', 'id-map', 'ordered-dict', 'tracker',
            'mongo-id', 'random', 'diff-sequence']);
   // This package is used for geo-location queries such as $near
   api.use('geojson-utils');
   // This package is used to get diff results on arrays and objects
   api.use('diff-sequence');
+
   api.addFiles([
     'minimongo.js',
     'wrap_transform.js',

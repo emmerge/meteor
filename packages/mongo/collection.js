@@ -199,7 +199,12 @@ Mongo.Collection = function (name, options) {
       },
       retrieveOriginals: function () {
         return self._collection.retrieveOriginals();
-      }
+      },
+
+      // Used to preserve current versions of documents across a store reset.
+      getDoc: function(id) {
+        return self.findOne(id);
+      },
     });
 
     if (!ok)
@@ -327,6 +332,12 @@ Mongo.Collection._rewriteSelector = function (selector) {
   // shorthand -- scalars match _id
   if (LocalCollection._selectorIsId(selector))
     selector = {_id: selector};
+
+  if (_.isArray(selector)) {
+    // This is consistent with the Mongo console itself; if we don't do this
+    // check passing an empty array ends up selecting all items
+    throw new Error("Mongo selector can't be an array.");
+  }
 
   if (!selector || (('_id' in selector) && !selector._id))
     // can't match anything

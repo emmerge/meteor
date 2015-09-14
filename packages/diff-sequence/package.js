@@ -1,6 +1,7 @@
 Package.describe({
   summary: "An implementation of a diff algorithm on arrays and objects.",
-  version: '1.0.0'
+  version: '1.0.0-plugins.0',
+  documentation: null
 });
 
 Package.onUse(function (api) {
@@ -12,11 +13,14 @@ Package.onUse(function (api) {
 });
 
 Package.onTest(function (api) {
-  api.use('tinytest');
+  api.use([
+    'tinytest',
+    'underscore',
+    'ejson'
+  ]);
+
   api.use('diff-sequence');
   api.addFiles([
     'tests.js'
   ]);
 });
-
-

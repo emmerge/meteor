@@ -323,9 +323,9 @@ var Connection = function (url, options) {
   };
 
   if (Meteor.isServer) {
-    self._stream.on('message', Meteor.bindEnvironment(onMessage, Meteor._debug));
-    self._stream.on('reset', Meteor.bindEnvironment(onReset, Meteor._debug));
-    self._stream.on('disconnect', Meteor.bindEnvironment(onDisconnect, Meteor._debug));
+    self._stream.on('message', Meteor.bindEnvironment(onMessage, "handling DDP message"));
+    self._stream.on('reset', Meteor.bindEnvironment(onReset, "handling DDP reset"));
+    self._stream.on('disconnect', Meteor.bindEnvironment(onDisconnect, "handling DDP disconnect"));
   } else {
     self._stream.on('message', onMessage);
     self._stream.on('reset', onReset);
@@ -440,7 +440,7 @@ _.extend(Connection.prototype, {
     // implemented by 'store' into a no-op.
     var store = {};
     _.each(['update', 'beginUpdate', 'endUpdate', 'saveOriginals',
-            'retrieveOriginals'], function (method) {
+            'retrieveOriginals', 'getDoc'], function (method) {
               store[method] = function () {
                 return (wrappedStore[method]
                         ? wrappedStore[method].apply(wrappedStore, arguments)
@@ -1279,10 +1279,24 @@ _.extend(Connection.prototype, {
     var serverDoc = self._getServerDoc(msg.collection, id);
     if (serverDoc) {
       // Some outstanding stub wrote here.
-      if (serverDoc.document !== undefined)
-        throw new Error("Server sent add for existing id: " + msg.id);
+      var isExisting = (serverDoc.document !== undefined);
+
       serverDoc.document = msg.fields || {};
       serverDoc.document._id = id;
+
+      if (self._resetStores) {
+        // During reconnect the server is sending adds for existing ids.
+        // Always push an update so that document stays in the store after
+        // reset. Use current version of the document for this update, so
+        // that stub-written values are preserved.
+        var currentDoc = self._stores[msg.collection].getDoc(msg.id);
+        if (currentDoc !== undefined)
+          msg.fields = currentDoc;
+
+        self._pushUpdate(updates, msg.collection, msg);
+      } else if (isExisting) {
+        throw new Error("Server sent add for existing id: " + msg.id);
+      }
     } else {
       self._pushUpdate(updates, msg.collection, msg);
     }

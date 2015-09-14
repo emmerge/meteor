@@ -1,25 +1,58 @@
-var archinfo = require('../archinfo.js');
-var buildmessage = require('../buildmessage.js');
+var archinfo = require('../utils/archinfo.js');
+var buildmessage = require('../utils/buildmessage.js');
 var buildPluginModule = require('./build-plugin.js');
-var colonConverter = require('../colon-converter.js');
-var files = require('../files.js');
+var colonConverter = require('../utils/colon-converter.js');
+var files = require('../fs/files.js');
 var compiler = require('./compiler.js');
 var linker = require('./linker.js');
 var util = require('util');
 var _ = require('underscore');
-var Profile = require('../profile.js').Profile;
-import {sha1} from  '../watch.js';
+var Profile = require('../tool-env/profile.js').Profile;
+import {sha1} from  '../fs/watch.js';
 import LRU from 'lru-cache';
-import {sourceMapLength} from '../utils.js';
+import Fiber from 'fibers';
+import {sourceMapLength} from '../utils/utils.js';
 
-// XXX #BBPDocs Add basic documentation of the data structures used in this
-// file.
-
-const CACHE_SIZE = process.env.METEOR_LINKER_CACHE_SIZE || 1024*1024*100;
-const CACHE_DEBUG = !! process.env.METEOR_TEST_PRINT_LINKER_CACHE_DEBUG;
+// This file implements the new compiler plugins added in Meteor 1.2, which are
+// registered with the Plugin.registerCompiler API.
+//
+// Unlike legacy source handlers (Plugin.registerSourceHandler), compilers run
+// in the context of an entire app. That is to say, they don't run when you run
+// `meteor publish`; whenever they run, they have access to all the files of
+// their type across all packages as well as the app. This allows them to
+// implement cross-file and cross-package inclusion, or config files in the app
+// that affect how packages are processed, among other possibilities.
+//
+// Compilers can specify which extensions or filenames they process. They only
+// process files in packages (or the app) that directly use the plugin's package
+// (or that use it indirectly via the "imply" directive); just because compiler
+// plugins act on multiple packages at a time doesn't mean they automatically
+// act on all packages in your app.
+//
+// The CompilerPluginProcessor is the main entry point to this file; it is used
+// by the bundler to run all plugins on a target. It doesn't have much
+// interesting state and perhaps could have just been a function.
+//
+// It receives an ordered list of unibuilds (essentially, packages) from the
+// bundler. It turns them into an ordered list of PackageSourceBatch objects,
+// each of which represents the source files in a single package. Each
+// PackageSourceBatch consists of an ordered list of ResourceSlots representing
+// the resources in that package. The idea here is that, because Meteor executes
+// all JS files in the order produced by the bundler, we need to make sure to
+// maintain the order of packages from the bundler and the order of source files
+// within a package. Each ResourceSlot represents a resource (either a 'source'
+// resource which will be processed by a compiler plugin, or something else like
+// a static asset or some JavaScript produced by a legacy source handler), and
+// when the compiler plugin calls something like `inputFile.addJavaScript` on a
+// file, we replace that source file with the resource produced by the plugin.
+//
+// InputFile is a wrapper around ResourceSlot that is the object presented to
+// the compiler in the plugin. It is part of the documented registerCompiler
+// API.
 
 // Cache the (slightly post-processed) results of linker.fullLink.
-// XXX #BBPBetterCache implement an on-disk cache too to speed up initial build?
+const CACHE_SIZE = process.env.METEOR_LINKER_CACHE_SIZE || 1024*1024*100;
+const CACHE_DEBUG = !! process.env.METEOR_TEST_PRINT_LINKER_CACHE_DEBUG;
 const LINKER_CACHE = new LRU({
   max: CACHE_SIZE,
   // Cache is measured in bytes. We don't care about servePath.
@@ -37,6 +70,11 @@ exports.CompilerPluginProcessor = function (options) {
   self.unibuilds = options.unibuilds;
   self.arch = options.arch;
   self.isopackCache = options.isopackCache;
+
+  self.linkerCacheDir = options.linkerCacheDir;
+  if (self.linkerCacheDir) {
+    files.mkdir_p(self.linkerCacheDir);
+  }
 };
 _.extend(exports.CompilerPluginProcessor.prototype, {
   runCompilerPlugins: function () {
@@ -47,7 +85,9 @@ _.extend(exports.CompilerPluginProcessor.prototype, {
     var sourceProcessorsWithSlots = {};
 
     var sourceBatches = _.map(self.unibuilds, function (unibuild) {
-      return new PackageSourceBatch(unibuild, self);
+      return new PackageSourceBatch(unibuild, self, {
+        linkerCacheDir: self.linkerCacheDir
+      });
     });
 
     // If we failed to match sources with processors, we're done.
@@ -78,7 +118,6 @@ _.extend(exports.CompilerPluginProcessor.prototype, {
     _.each(sourceProcessorsWithSlots, function (data, id) {
       var sourceProcessor = data.sourceProcessor;
       var resourceSlots = data.resourceSlots;
-      // XXX HERE
 
       var jobTitle = [
         "processing files with ",
@@ -256,7 +295,6 @@ _.extend(InputFile.prototype, {
   }
 });
 
-// XXX #BBPDocs
 var ResourceSlot = function (unibuildResourceInfo,
                              sourceProcessor,
                              packageSourceBatch) {
@@ -383,14 +421,13 @@ _.extend(ResourceSlot.prototype, {
   }
 });
 
-// XXX #BBPDocs document this data structure (or allude to potential top-of-file
-// docstring)
-var PackageSourceBatch = function (unibuild, processor) {
+var PackageSourceBatch = function (unibuild, processor, {linkerCacheDir}) {
   var self = this;
   buildmessage.assertInJob();
 
   self.unibuild = unibuild;
   self.processor = processor;
+  self.linkerCacheDir = linkerCacheDir;
   var sourceProcessorSet = self._getSourceProcessorSet();
   self.resourceSlots = [];
   unibuild.resources.forEach(function (resource) {
@@ -501,7 +538,11 @@ _.extend(PackageSourceBatch.prototype, {
       arch: bundleArch,
       isopackCache: isopackCache,
       skipUnordered: true,
-      skipDebugOnly: true
+      // don't import symbols from debugOnly and prodOnly packages, because
+      // if the package is not linked it will cause a runtime error.
+      // the code must access them with `Package["my-package"].MySymbol`.
+      skipDebugOnly: true,
+      skipProdOnly: true,
     }, addImportsForUnibuild);
 
     // Run the linker.
@@ -524,7 +565,7 @@ _.extend(PackageSourceBatch.prototype, {
       includeSourceMapInstructions: archinfo.matches(self.unibuild.arch, "web")
     };
 
-    const cacheKey = JSON.stringify({
+    const cacheKey = sha1(JSON.stringify({
       linkerOptions,
       files: jsResources.map((inputFile) => {
         // Note that we don't use inputFile.sourceMap in this cache key. Maybe
@@ -536,14 +577,48 @@ _.extend(PackageSourceBatch.prototype, {
           bare: inputFile.bare
         };
       })
-    });
+    }));
 
-    const cached = LINKER_CACHE.get(cacheKey);
-    if (cached) {
-      if (CACHE_DEBUG) {
-        console.log('LINKER CACHE HIT:', linkerOptions.name, bundleArch);
+    {
+      const inMemoryCached = LINKER_CACHE.get(cacheKey);
+      if (inMemoryCached) {
+        if (CACHE_DEBUG) {
+          console.log('LINKER IN-MEMORY CACHE HIT:',
+                      linkerOptions.name, bundleArch);
+        }
+        return inMemoryCached;
       }
-      return cached;
+    }
+
+    const cacheFilename = self.linkerCacheDir && files.pathJoin(
+      self.linkerCacheDir, cacheKey + '.cache');
+
+    // The return value from _linkJS includes Buffers, but we want everything to
+    // be JSON for writing to the disk cache. This function converts the string
+    // version to the Buffer version.
+    function bufferifyJSONReturnValue(resources) {
+      resources.forEach((r) => {
+        r.data = new Buffer(r.data, 'utf8');
+      });
+    }
+
+    if (cacheFilename) {
+      let diskCached = null;
+      try {
+        diskCached = files.readJSONOrNull(cacheFilename);
+      } catch (e) {
+        // Ignore JSON parse errors; pretend there was no cache.
+        if (!(e instanceof SyntaxError))
+          throw e;
+      }
+      if (diskCached && diskCached instanceof Array) {
+        // Fix the non-JSON part of our return value.
+        bufferifyJSONReturnValue(diskCached);
+        if (CACHE_DEBUG) {
+          console.log('LINKER DISK CACHE HIT:', linkerOptions.name, bundleArch);
+        }
+        return diskCached;
+      }
     }
 
     if (CACHE_DEBUG) {
@@ -566,14 +641,31 @@ _.extend(PackageSourceBatch.prototype, {
         ? JSON.parse(file.sourceMap) : file.sourceMap;
       return {
         type: "js",
-        data: new Buffer(file.source, 'utf8'), // XXX encoding
+        // This is a string... but we will convert it to a Buffer
+        // before returning from the method (but after writing
+        // to cache).
+        data: file.source,
         servePath: file.servePath,
         sourceMap: sm
       };
     });
+
+    let retAsJSON;
+    if (canCache && cacheFilename) {
+      retAsJSON = JSON.stringify(ret);
+    }
+
+    // Convert strings to buffers, now that we've serialized it.
+    bufferifyJSONReturnValue(ret);
+
     if (canCache) {
       LINKER_CACHE.set(cacheKey, ret);
+      if (cacheFilename) {
+        // Write asynchronously.
+        Fiber(() => files.writeFileAtomically(cacheFilename, retAsJSON)).run();
+      }
     }
+
     return ret;
   })
 });
