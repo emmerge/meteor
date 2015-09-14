@@ -1,15 +1,15 @@
 Package.describe({
   name: 'emmerge:google',
   summary: "Google OAuth flow",
-  version: "1.1.6-plugins.0"
+  version: "1.1.5"
 });
 
 Package.onUse(function(api) {
-  api.use('oauth2@1.1.5-plugins.1', ['client', 'server']);
-  api.use('oauth@1.1.4-plugins.0', ['client', 'server']);
-  api.use('http@1.1.1-plugins.0', ['server']);
-  api.use(['underscore@1.0.4-plugins.0', 'service-configuration@1.0.5-plugins.0'], ['client', 'server']);
-  api.use(['random@1.0.4-plugins.0', 'templating@1.1.2-plugins.1'], 'client');
+  api.use('oauth2@1.1.3', ['client', 'server']);
+  api.use('oauth@1.1.4', ['client', 'server']);
+  api.use('http@1.1.0', ['server']);
+  api.use(['underscore@1.0.3', 'service-configuration@1.0.4'], ['client', 'server']);
+  api.use(['random@1.0.3', 'templating@1.1.1'], 'client');
 
   api.export('Google');
 
