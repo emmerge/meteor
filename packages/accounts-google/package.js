@@ -1,7 +1,7 @@
  Package.describe({
    name: 'emmerge:accounts-google',
    summary: "Login service for Google accounts",
-   version: "1.0.4_1"
+   version: "1.0.4_2"
  });
  
  Package.onUse(function(api) {

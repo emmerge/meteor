@@ -55,12 +55,23 @@ Google.requestCredential = function (options, credentialRequestCompleteCallback)
   }
 
   var loginStyle = OAuth._loginStyle('google', config, options);
+
+
+
+  if (!window.location.origin) {
+     // This is for IE support (boo!) and meant for clarity describing the origin method:
+     window.location.origin = window.location.protocol + "//" + window.location.hostname + (window.location.port ? ':' + window.location.port: '');
+   }
+  var appRootUrl = window.location.origin;
+  var redirectUri = OAuth._redirectUri('nylas', config, undefined, {rootUrl: appRootUrl});
+
+
   // https://developers.google.com/accounts/docs/OAuth2WebServer#formingtheurl
   _.extend(loginUrlParameters, {
     "response_type": "code",
     "client_id":  config.clientId,
     "scope": scope.join(' '), // space delimited
-    "redirect_uri": OAuth._redirectUri('google', config),
+    "redirect_uri": redirectUri,
     "state": OAuth._stateParam(loginStyle, credentialToken, options.redirectUrl)
   });
   var loginUrl = 'https://accounts.google.com/o/oauth2/auth?' +
