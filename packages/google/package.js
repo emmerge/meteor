@@ -1,7 +1,7 @@
 Package.describe({
   name: 'emmerge:google',
   summary: "Google OAuth flow",
-  version: "1.1.5_2"
+  version: "1.1.5_3"
 });
 
 Package.onUse(function(api) {
