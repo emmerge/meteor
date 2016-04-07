@@ -63,7 +63,7 @@ Google.requestCredential = function (options, credentialRequestCompleteCallback)
      window.location.origin = window.location.protocol + "//" + window.location.hostname + (window.location.port ? ':' + window.location.port: '');
    }
   var appRootUrl = window.location.origin;
-  var redirectUri = OAuth._redirectUri('nylas', config, undefined, {rootUrl: appRootUrl});
+  var redirectUri = OAuth._redirectUri('google', config, undefined, {rootUrl: appRootUrl});
 
 
   // https://developers.google.com/accounts/docs/OAuth2WebServer#formingtheurl
